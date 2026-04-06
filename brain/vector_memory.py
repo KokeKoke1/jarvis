@@ -7,7 +7,7 @@ from openai import OpenAI
 EMBEDDING_MODEL = "text-embedding-3-small"
 HISTORY_FILE = "memory/history.json"
 
-client = OpenAI()  # Podłącz swoje API OpenAI lub Claude API
+client = OpenAI()
 
 class VectorMemory:
     def __init__(self, dim=1536):
@@ -18,7 +18,7 @@ class VectorMemory:
     def add(self, text, meta=None):
         embedding = self.get_embedding(text)
         self.index.add(np.array([embedding], dtype='float32'))
-        self.metadata.append(meta or {"text": text})
+        self.metadata.append(meta or {"task": text})
         self.save()
 
     def query(self, text, k=5):
@@ -37,10 +37,7 @@ class VectorMemory:
 
     def save(self):
         os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
-        data = {
-            "meta": self.metadata,
-            "index": self.index_to_list()
-        }
+        data = {"meta": self.metadata, "index": self.index_to_list()}
         with open(HISTORY_FILE, "w") as f:
             json.dump(data, f)
 
@@ -61,6 +58,5 @@ class VectorMemory:
             embeddings = np.array(arr, dtype='float32')
             self.index.add(embeddings)
 
-# Singleton
 MEMORY = VectorMemory()
 MEMORY.load()

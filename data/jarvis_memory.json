@@ -306,5 +306,5 @@
     "whatsapp_file_method": "clipboard_cmdV — NIE używaj \"+\" button, to wychodzi z czatu",
     "jarvis_workflow": "gdy brak rozwiazania → jarvis_ask_gpt.sh → kod od ChatGPT → opcjonalnie podmien skrypt z backupem"
   },
-  "saved": 1775491016.0891478
+  "saved": 1775491256.10071
 }
