@@ -1,83 +1,154 @@
 #!/usr/bin/env python3
-"""J.A.R.V.I.S. — Main entry point."""
-import http.server, ssl, os, threading, sys
+"""J.A.R.V.I.S. — Enhanced Main Entry Point."""
+import http.server
+import ssl
+import os
+import threading
+import sys
+import json
+from queue import Queue
+import subprocess
+from datetime import datetime
+from brain.planner import plan_task
+from brain.vector_memory import MEMORY
 
-# Add parent to path so imports work
+
+# Konfiguracja
+PORT = 8080
+SSL_DIR = "ssl"
+USE_SSL = os.path.exists(SSL_DIR)
+HISTORY_FILE = "memory/history.json"
+
+# --------------------------
+# Prosta pamięć
+# --------------------------
+HISTORY = []
+
+def load_memory():
+    global HISTORY
+    if os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE, "r") as f:
+            HISTORY = json.load(f)
+
+def save_memory():
+    os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
+    with open(HISTORY_FILE, "w") as f:
+        json.dump(HISTORY, f, indent=2)
+
+# --------------------------
+# Task Queue (Planner)
+# --------------------------
+TASK_QUEUE = Queue()
+
+def add_task(task):
+    """Dodaje task do kolejki i do pamięci wektorowej"""
+    TASK_QUEUE.put(task)
+    MEMORY.add(task, meta={"task": task})
+    print(f"[Memory] Task dodany do vector memory: {task}")
+
+def process_tasks():
+    while True:
+        task = TASK_QUEUE.get()
+        if task is None:
+            break
+        print(f"[Executor] Processing task: {task}")
+        execute_task(task)
+        TASK_QUEUE.task_done()
+
+def add_goal(goal):
+    """Przyjmuje cel od Claude i rozbija go na taski"""
+    tasks = plan_task(goal, history=HISTORY)
+    for t in tasks:
+        add_task(t)
+    print(f"[Planner] Rozbiłem cel na {len(tasks)} tasków")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from jarvis.brain.config import PORT, SSL_DIR
-from jarvis.brain import memory
-from jarvis.server.handler import JarvisHandler
-
-
-def get_ip():
-    """Get local IP address."""
-    import subprocess
-    try:
-        return subprocess.check_output(["ipconfig", "getifaddr", "en0"],
-                                        text=True).strip()
-    except:
+# --------------------------
+# Executor
+# --------------------------
+def execute_task(task):
+    """Prosty executor: shell, file actions, etc."""
+    timestamp = datetime.now().isoformat()
+    HISTORY.append({"time": timestamp, "task": task})
+    
+    if task.startswith("shell:"):
+        cmd = task.replace("shell:", "", 1).strip()
         try:
-            return subprocess.check_output(["ipconfig", "getifaddr", "en1"],
-                                            text=True).strip()
-        except:
-            return "localhost"
+            result = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, text=True)
+            print(f"[Shell] {result}")
+        except subprocess.CalledProcessError as e:
+            print(f"[Shell Error] {e.output}")
+    elif task.startswith("log:"):
+        msg = task.replace("log:", "", 1).strip()
+        print(f"[Log] {msg}")
+    # tutaj można dodać więcej typów akcji
+    save_memory()
 
+# --------------------------
+# HTTP Handler
+# --------------------------
+class JarvisHandler(http.server.BaseHTTPRequestHandler):
+    def _send(self, data):
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode("utf-8"))
+        
 
+    def do_GET(self):
+        if self.path == "/history":
+            self._send({"history": HISTORY})
+        else:
+            self._send({"status": "ready"})
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length)
+        data = json.loads(body)
+
+        # Obsługa goal
+        if 'goal' in data:
+            add_goal(data['goal'])
+            self._send({"status": "goal added", "goal": data['goal']})
+            return
+
+        # Obsługa zwykłych tasków
+        task = data.get("task")
+        if task:
+            add_task(task)
+            self._send({"status": "task added", "task": task})
+            return
+
+        # Brak tasku/goal
+        self._send({"status": "no task or goal received"})
+            
+
+# --------------------------
+# Main
+# --------------------------
 def main():
-    # Load persistent memory
-    memory.load()
+    load_memory()
+    threading.Thread(target=process_tasks, daemon=True).start()
 
-    # Start auto-save thread
-    threading.Thread(target=memory.auto_save_loop, daemon=True).start()
-
-    # Create server
     server = http.server.HTTPServer(("0.0.0.0", PORT), JarvisHandler)
-
-    # SSL setup
-    cert_file = os.path.join(SSL_DIR, "cert.pem")
-    key_file = os.path.join(SSL_DIR, "key.pem")
-    use_ssl = False
-    if os.path.exists(cert_file) and os.path.exists(key_file):
-        try:
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ctx.set_ciphers('DEFAULT:!aNULL:!eNULL:!MD5')
-            ctx.load_cert_chain(cert_file, key_file)
-            server.socket = ctx.wrap_socket(server.socket, server_side=True)
-            use_ssl = True
-        except Exception as e:
-            print(f"  SSL failed: {e}")
-
-    proto = "https" if use_ssl else "http"
-    ip = get_ip()
-
-    print(f"""
-\033[38;5;214m
-       ██╗ █████╗ ██████╗ ██╗   ██╗██╗███████╗
-       ██║██╔══██╗██╔══██╗██║   ██║██║██╔════╝
-       ██║███████║██████╔╝██║   ██║██║███████╗
-  ██   ██║██╔══██║██╔══██╗╚██╗ ██╔╝██║╚════██║
-  ╚█████╔╝██║  ██║██║  ██║ ╚████╔╝ ██║███████║
-   ╚════╝ ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚═╝╚══════╝
-\033[0m
-  \033[1mJ.A.R.V.I.S.\033[0m  v5.1 — Just A Rather Very Intelligent System
-  ──────────────────────────────────────────
-  \033[38;5;214m>\033[0m Phone:   {proto}://{ip}:{PORT}
-  \033[38;5;214m>\033[0m Local:   {proto}://localhost:{PORT}
-  \033[38;5;214m>\033[0m SSL:     {'ON' if use_ssl else 'OFF'}
-  \033[38;5;214m>\033[0m Memory:  {len(memory.HISTORY)} messages
-  ──────────────────────────────────────────
-  "At your service, Sir."
-""")
+    
+    if USE_SSL:
+        server.socket = ssl.wrap_socket(
+            server.socket,
+            server_side=True,
+            certfile=os.path.join(SSL_DIR, "cert.pem"),
+            keyfile=os.path.join(SSL_DIR, "key.pem"),
+            ssl_version=ssl.PROTOCOL_TLS
+        )
+    
+    print(f"J.A.R.V.I.S. Enhanced running on port {PORT} (SSL={USE_SSL})")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n  Shutting down... saving memory.")
-        memory.save()
+        print("\nShutting down...")
+        save_memory()
+        TASK_QUEUE.put(None)
         server.server_close()
-        print("  Goodbye, Sir.")
-
 
 if __name__ == "__main__":
     main()
-
